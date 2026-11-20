@@ -1,5 +1,5 @@
 """OJ HTTP 服务器 v2 — 注册/登录 · 代码编辑器提交 · 实时状态页"""
-import sys, os, time, pathlib, collections
+import sys, os, time, pathlib, collections, secrets
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from flask import Flask, request, jsonify, abort, Response, send_file
 from oj.db import (init_db, enqueue, get_submission, get_leaderboard,
@@ -74,19 +74,29 @@ def register():
     t = create_team(name)
     return jsonify(t), 201
 
-# ── 登录（凭 token 获取队伍信息）──────────────────────────
+# ── 登录（队伍 token 或管理员密钥）────────────────────────
+_ADMIN_PLACEHOLDERS = {"", "hackerson-admin", "请改成随机字符串"}
+
+def _is_admin_token(tok: str) -> bool:
+    """管理员密钥未设置或仍为占位值时，禁用管理员登录。"""
+    if ADMIN_SECRET in _ADMIN_PLACEHOLDERS or len(ADMIN_SECRET) < 12:
+        return False
+    return bool(tok) and secrets.compare_digest(tok, ADMIN_SECRET)
+
 @app.route("/api/login", methods=["POST"])
 def login():
     data = request.get_json(force=True) or {}
     token = (data.get("token") or "").strip()
     if not token:
         return jsonify({"error": "请提供 token"}), 400
+    if _is_admin_token(token):
+        return jsonify({"role": "admin", "name": "管理员"})
     conn = get_conn()
-    row = conn.execute("SELECT id, name, token FROM teams WHERE token=?", (token,)).fetchone()
+    row = conn.execute("SELECT id, name FROM teams WHERE token=?", (token,)).fetchone()
     conn.close()
     if not row:
         return jsonify({"error": "token 无效"}), 401
-    return jsonify(dict(row))
+    return jsonify({"role": "team", **dict(row)})
 
 # ── 文件提交 ───────────────────────────────────────────────
 @app.route("/api/submit", methods=["POST"])
@@ -140,7 +150,7 @@ def status(sid):
         return jsonify({"error": "无权查看此提交"}), 403
     # 返回 viz 链接（若有）
     if sub.get("viz_path"):
-        sub["viz_url"] = f"/api/viz/{sid}"
+        sub["viz_url"] = f"/viz/{sid}"
     return jsonify(sub)
 
 # ── 本队提交历史 ───────────────────────────────────────────
@@ -158,7 +168,8 @@ def my_submissions():
     out = []
     for r in rows:
         d = dict(r)
-        if d.get("viz_path"): d["viz_url"] = f"/api/viz/{d['id']}"
+        d["viz_url"] = f"/viz/{d['id']}" if d.get("viz_path") else None
+        d.pop("viz_path", None)
         out.append(d)
     return jsonify(out)
 
@@ -166,273 +177,75 @@ def my_submissions():
 @app.route("/api/leaderboard")
 def leaderboard_api():
     phase = request.args.get("phase", CURRENT_PHASE)
-    return jsonify({"phase": phase, "rows": get_leaderboard(phase)})
+    rows = get_leaderboard(phase)
+    for d in rows:
+        d["viz_url"] = f"/viz/{d['id']}" if d.pop("viz_path", None) else None
+    return jsonify({"phase": phase, "rows": rows})
 
-# ── Gantt 可视化 ───────────────────────────────────────────
-@app.route("/api/viz/<int:sid>")
-@require_auth
+# ── 3D 可视化（公开：榜单与提交记录都可直接打开）──────────
+@app.route("/viz/<int:sid>")
 def serve_viz(sid):
     sub = get_submission(sid)
-    if not sub: abort(404)
-    if sub["team_id"] != request.team["id"]: abort(403)
+    if not sub or sub.get("status") != "done": abort(404)
     vp = sub.get("viz_path")
-    if not vp or not os.path.exists(vp): abort(404)
-    return send_file(vp, mimetype="text/html")
+    if not vp: abort(404)
+    p = pathlib.Path(vp).resolve()
+    if p.parent != VIZ_DIR.resolve() or not p.exists(): abort(404)
+    return send_file(str(p), mimetype="text/html")
 
-# ── 管理接口（API）────────────────────────────────────────
+# ── 管理接口：Authorization: Bearer <OJ_ADMIN> ─────────────
 def _require_admin():
-    secret = (request.headers.get("X-Admin-Secret")
-              or request.args.get("secret")
-              or (request.get_json(silent=True) or {}).get("secret", ""))
-    if secret != ADMIN_SECRET:
+    hdr = request.headers.get("Authorization", "")
+    tok = hdr[7:].strip() if hdr.startswith("Bearer ") else request.headers.get("X-Admin-Secret", "")
+    if not _is_admin_token(tok):
         abort(403)
 
-@app.route("/admin/team", methods=["POST"])
-def admin_create_team():
-    _require_admin()
-    data = request.get_json(force=True) or {}
-    if "name" not in data: return jsonify({"error": "需要 name 字段"}), 400
-    return jsonify(create_team(data["name"])), 201
-
-@app.route("/admin/api/teams", methods=["GET"])
+@app.route("/api/admin/teams", methods=["GET"])
 def admin_list_teams():
     _require_admin()
     return jsonify(get_all_teams())
 
-@app.route("/admin/api/teams", methods=["POST"])
+@app.route("/api/admin/teams", methods=["POST"])
 def admin_add_team():
     _require_admin()
     data = request.get_json(force=True) or {}
     name = (data.get("name") or "").strip()
-    if not name: return jsonify({"error": "需要 name"}), 400
+    if not name or len(name) > 40:
+        return jsonify({"error": "队伍名称须为 1–40 个字符"}), 400
     return jsonify(create_team(name)), 201
 
-@app.route("/admin/api/teams/<int:tid>", methods=["DELETE"])
+@app.route("/api/admin/teams/<int:tid>", methods=["DELETE"])
 def admin_del_team(tid):
     _require_admin()
     delete_team(tid)
     return jsonify({"ok": True})
 
-@app.route("/admin/api/submissions")
+@app.route("/api/admin/submissions")
 def admin_list_submissions():
     _require_admin()
-    limit = int(request.args.get("limit", 200))
-    return jsonify(get_all_submissions(limit))
+    limit = min(int(request.args.get("limit", 200)), 1000)
+    rows = get_all_submissions(limit)
+    for d in rows:
+        d["viz_url"] = f"/viz/{d['id']}" if d.get("viz_path") and d.get("status") == "done" else None
+        d.pop("viz_path", None); d.pop("policy_path", None)
+    return jsonify(rows)
 
-@app.route("/admin/api/reset_submission/<int:sid>", methods=["POST"])
-def admin_reset_submission(sid):
+@app.route("/api/admin/requeue/<int:sid>", methods=["POST"])
+def admin_requeue(sid):
     """把 error/running 状态的提交重置为 queued，方便重试。"""
     _require_admin()
     conn = get_conn()
-    conn.execute(
-        "UPDATE submissions SET status='queued', error_msg=NULL WHERE id=? AND status IN ('error','running')",
-        (sid,))
-    conn.commit()
-    conn.close()
+    conn.execute("UPDATE submissions SET status='queued', error_msg=NULL "
+                 "WHERE id=? AND status IN ('error','running')", (sid,))
+    conn.commit(); conn.close()
     return jsonify({"ok": True})
 
-# ── 管理后台页面 ──────────────────────────────────────────
-@app.route("/admin")
-@app.route("/admin/")
-def admin_page():
-    secret = request.args.get("secret", "")
-    if secret != ADMIN_SECRET:
-        return Response(
-            '<form method="get"><input name="secret" type="password" placeholder="管理密钥">'
-            '<button>进入</button></form>', mimetype="text/html")
-    return Response(_ADMIN_HTML.replace("__SECRET__", secret), mimetype="text/html")
-
-# ── Demo 可视化（公开，无需登录）──────────────────────────
-DEMO_VIZ_DIR = pathlib.Path(__file__).parent / "demo_viz"
-DEMO_VIZ_DIR.mkdir(exist_ok=True)
-
-@app.route("/demo_viz")
-def demo_viz_index():
-    files = sorted(DEMO_VIZ_DIR.glob("*.html"))
-    if not files:
-        return Response(
-            "<p style='font-family:sans-serif;padding:40px'>暂无演示数据，"
-            "请运行 <code>python3 tools/seed_demo.py</code> 生成。</p>",
-            mimetype="text/html")
-    if len(files) == 1:
-        return send_file(str(files[0]), mimetype="text/html")
-    links = "".join(
-        f'<li><a href="/demo_viz/{f.name}">{f.stem}</a></li>' for f in files)
-    return Response(
-        f'<ul style="font-family:sans-serif;padding:40px;line-height:2">{links}</ul>',
-        mimetype="text/html")
-
-@app.route("/demo_viz/<path:fname>")
-def demo_viz_file(fname):
-    p = DEMO_VIZ_DIR / pathlib.Path(fname).name
-    if not p.exists() or p.suffix != ".html":
-        abort(404)
-    return send_file(str(p), mimetype="text/html")
-
-# ── 前端页面 ──────────────────────────────────────────────
+# ── 前端页面（单页应用）────────────────────────────────────
 @app.route("/")
-def index(): return Response(_APP_HTML, mimetype="text/html")
-
 @app.route("/submit")
-def submit_page(): return Response(_APP_HTML, mimetype="text/html")
-
 @app.route("/dashboard")
-def dashboard_page(): return Response(_APP_HTML, mimetype="text/html")
-
-_ADMIN_HTML = r"""<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OJ 管理后台</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,"PingFang SC","Segoe UI",sans-serif;background:#f0f2f5;color:#1f1f1f}
-header{background:#b71c1c;color:#fff;padding:12px 24px;display:flex;align-items:center;gap:16px}
-header h1{font-size:16px;font-weight:700}
-.nav{display:flex;gap:16px;font-size:13px}
-.nav a{color:#fff;opacity:.85;cursor:pointer}
-.nav a:hover{opacity:1}
-.card{background:#fff;border-radius:10px;padding:20px 22px;
-box-shadow:0 1px 4px rgba(0,0,0,.08);margin:16px 24px}
-h2{font-size:15px;font-weight:700;margin-bottom:14px}
-input[type=text]{padding:7px 11px;border:1px solid #ddd;border-radius:7px;
-font-size:13px;outline:none;width:220px}
-input:focus{border-color:#b71c1c}
-button{padding:7px 16px;background:#b71c1c;color:#fff;border:none;border-radius:7px;
-font-size:13px;font-weight:600;cursor:pointer}
-button:hover{background:#8e0000}
-button.del{background:#ea4335;padding:4px 10px;font-size:12px}
-button.del:hover{background:#c62828}
-button.reset{background:#f57c00;padding:4px 10px;font-size:12px}
-button.reset:hover{background:#e65100}
-table{width:100%;border-collapse:collapse}
-thead tr{background:#fafafa;border-bottom:2px solid #e8eaed}
-th{padding:9px 10px;text-align:left;font-size:11px;font-weight:600;
-color:#888;text-transform:uppercase;letter-spacing:.4px}
-td{padding:9px 10px;font-size:13px;border-bottom:1px solid #f0f0f0}
-tr:last-child td{border-bottom:none}
-tr:hover td{background:#fafafa}
-.token{font-family:monospace;font-size:12px;color:#555;word-break:break-all}
-.sc{font-weight:700;color:#1a73e8}
-.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
-.badge.queued{background:#e8eaed;color:#666}
-.badge.running{background:#feefc3;color:#b06000}
-.badge.done{background:#e6f4ea;color:#1e7e34}
-.badge.error{background:#fce8e6;color:#c62828}
-.msg{font-size:12px;color:#1e7e34;margin-left:10px}
-.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
-.err-txt{font-size:11px;color:#c62828;max-width:300px;overflow:hidden;
-white-space:nowrap;text-overflow:ellipsis}
-</style></head><body>
-<header>
-<h1>🔧 OJ 管理后台</h1>
-<div class="nav">
-<a onclick="showTab('teams')">队伍管理</a>
-<a onclick="showTab('subs')">提交记录</a>
-<a href="/demo_viz" target="_blank">Demo 可视化</a>
-<a href="/" target="_blank">参赛者页面</a>
-</div>
-</header>
-
-<div id="tab-teams">
-<div class="card">
-<h2>添加队伍</h2>
-<div class="row">
-<input type="text" id="new-name" placeholder="队伍名称（支持中文）">
-<button onclick="addTeam()">创建并获取 token</button>
-<span class="msg" id="add-msg"></span>
-</div>
-</div>
-<div class="card">
-<h2>所有队伍 <span id="team-count" style="font-weight:400;color:#888;font-size:13px"></span></h2>
-<table><thead><tr>
-<th>ID</th><th>队伍名称</th><th>Token</th><th>注册时间</th><th>操作</th>
-</tr></thead><tbody id="team-body">
-<tr><td colspan="5" style="text-align:center;padding:30px;color:#888">加载中…</td></tr>
-</tbody></table>
-</div>
-</div>
-
-<div id="tab-subs" style="display:none">
-<div class="card">
-<div class="row" style="margin-bottom:0">
-<h2 style="margin-bottom:0">最近 200 条提交</h2>
-<button class="reset" style="margin-left:auto" onclick="loadSubs()">刷新</button>
-</div>
-</div>
-<div class="card">
-<table><thead><tr>
-<th>#</th><th>队伍</th><th>阶段</th><th>状态</th>
-<th style="text-align:right">综合分</th><th>F2</th><th>F3</th><th>F6</th>
-<th>提交时间</th><th>错误</th><th>操作</th>
-</tr></thead><tbody id="sub-body">
-<tr><td colspan="11" style="text-align:center;padding:30px;color:#888">加载中…</td></tr>
-</tbody></table>
-</div>
-</div>
-
-<script>
-const SECRET = '__SECRET__';
-const qs = k => document.getElementById(k);
-function fmt(v){return(v===null||v===undefined)?'—':(+v).toFixed(1);}
-function badge(s){const m={queued:'排队',running:'评测中',done:'完成',error:'错误'};
-return `<span class="badge ${s}">${m[s]||s}</span>`;}
-function relTime(s){if(!s)return'';
-const d=new Date(s.replace(' ','T')+'Z'),now=new Date();
-const m=Math.round((now-d)/60000);
-if(m<1)return'刚刚';if(m<60)return m+'分前';
-const h=Math.floor(m/60);if(h<24)return h+'小时前';return s.slice(5,16);}
-function showTab(t){
-qs('tab-teams').style.display=t==='teams'?'':'none';
-qs('tab-subs').style.display=t==='subs'?'':'none';
-if(t==='teams')loadTeams();else loadSubs();}
-async function api(url,opts={}){
-const sep=url.includes('?')?'&':'?';
-return fetch(url+sep+'secret='+SECRET,opts).then(r=>r.json());}
-async function loadTeams(){
-const rows=await api('/admin/api/teams');
-qs('team-count').textContent=`(${rows.length} 支)`;
-const b=qs('team-body');
-if(!rows.length){b.innerHTML='<tr><td colspan="5" style="text-align:center;padding:30px;color:#888">暂无队伍</td></tr>';return;}
-b.innerHTML=rows.map(t=>`<tr>
-<td style="color:#888">${t.id}</td>
-<td style="font-weight:600">${t.name}</td>
-<td class="token">${t.token}</td>
-<td style="color:#888">${t.created_at||''}</td>
-<td><button class="del" onclick="delTeam(${t.id},'${t.name.replace(/'/g,'\\'')}')">删除</button></td>
-</tr>`).join('');}
-async function addTeam(){
-const name=qs('new-name').value.trim();if(!name)return;
-const r=await api('/admin/api/teams',{method:'POST',
-headers:{'Content-Type':'application/json'},
-body:JSON.stringify({name})});
-qs('add-msg').textContent=r.token?`token: ${r.token}`:(r.error||'已存在');
-qs('new-name').value='';loadTeams();}
-async function delTeam(id,name){
-if(!confirm(`确定删除队伍「${name}」及其所有提交？`))return;
-await api('/admin/api/teams/'+id,{method:'DELETE'});loadTeams();}
-async function loadSubs(){
-const rows=await api('/admin/api/submissions?limit=200');
-const b=qs('sub-body');
-if(!rows.length){b.innerHTML='<tr><td colspan="11" style="text-align:center;padding:30px;color:#888">暂无提交</td></tr>';return;}
-b.innerHTML=rows.map(x=>`<tr>
-<td>#${x.id}</td>
-<td style="font-weight:600">${x.team_name}</td>
-<td>${x.phase}</td>
-<td>${badge(x.status)}</td>
-<td style="text-align:right" class="sc">${fmt(x.combined)}</td>
-<td>${fmt(x.score_F2)}</td><td>${fmt(x.score_F3)}</td><td>${fmt(x.score_F6)}</td>
-<td style="color:#888">${relTime(x.submitted_at)}</td>
-<td>${x.error_msg?`<span class="err-txt" title="${x.error_msg}">${x.error_msg}</span>`:'—'}</td>
-<td>${(x.status==='error'||x.status==='running')?
-`<button class="reset" onclick="resetSub(${x.id})">重试</button>`:'—'}
-${x.viz_path?`<a href="/demo_viz" target="_blank" style="font-size:12px;margin-left:6px">viz</a>`:''}
-</td>
-</tr>`).join('');}
-async function resetSub(sid){
-await api('/admin/api/reset_submission/'+sid,{method:'POST'});loadSubs();}
-loadTeams();
-</script></body></html>
-"""
+@app.route("/admin")
+def index(): return Response(_APP_HTML, mimetype="text/html")
 
 _APP_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
@@ -505,10 +318,9 @@ a.lk:hover{text-decoration:underline}
 <h1>🏭 单臂柔性机加单元调度黑客松</h1>
 <div class="nav">
 <a onclick="go('leaderboard')">榜单</a>
-<a onclick="go('submit')">提交</a>
-<a onclick="go('dashboard')">我的提交</a>
-<a href="/demo_viz" target="_blank">演示</a>
-<a href="/admin" target="_blank">管理</a>
+<a id="nav-submit" onclick="go('submit')">提交</a>
+<a id="nav-dashboard" onclick="go('dashboard')">我的提交</a>
+<a id="nav-admin" class="hidden" onclick="go('admin')">管理</a>
 <span class="user" id="user-badge"></span>
 </div></header>
 
@@ -524,9 +336,9 @@ a.lk:hover{text-decoration:underline}
 </div>
 <table><thead><tr>
 <th>排名</th><th>队伍</th><th style="text-align:right">综合分</th>
-<th>F2</th><th>F3</th><th>F6</th><th>提交时间</th><th>备注</th>
+<th>F2</th><th>F3</th><th>F6</th><th>提交时间</th><th>备注</th><th>策略动画</th>
 </tr></thead><tbody id="lb-body">
-<tr><td colspan="8" class="empty">加载中…</td></tr>
+<tr><td colspan="9" class="empty">加载中…</td></tr>
 </tbody></table>
 </div></div>
 
@@ -543,14 +355,12 @@ placeholder="def decide(obs):&#10;    acts = obs['legal_actions']&#10;    ..."><
 </div>
 <div>
 <label>或上传 .py 文件</label>
-<input type="file" id="file-input" accept=".py"
- onchange="onFilePick(event)">
+<input type="file" id="file-input" accept=".py" onchange="onFilePick(event)">
 <div style="height:8px"></div>
 <label>备注（显示在榜单，可选）</label>
-<input type="text" id="label-input" placeholder="v3 rollout">
+<input type="text" id="label-input" maxlength="128" placeholder="v3 rollout">
 <div style="height:12px"></div>
 <button onclick="doSubmit()">提交并排队评测</button>
-<button class="ghost" onclick="loadTemplate()">载入示例</button>
 <div class="msg" id="submit-msg"></div>
 <div class="hint" id="submit-hint"></div>
 </div></div></div></div>
@@ -563,142 +373,173 @@ placeholder="def decide(obs):&#10;    acts = obs['legal_actions']&#10;    ..."><
 </div>
 <table><thead><tr>
 <th>#</th><th>状态</th><th style="text-align:right">综合分</th>
-<th>F2</th><th>F3</th><th>F6</th><th>提交时间</th><th>备注</th><th>可视化</th>
+<th>F2</th><th>F3</th><th>F6</th><th>提交时间</th><th>备注</th><th>策略动画</th>
 </tr></thead><tbody id="dash-body">
-<tr><td colspan="9" class="empty">请先登录</td></tr>
+<tr><td colspan="9" class="empty">加载中…</td></tr>
 </tbody></table></div></div>
+
+<div id="view-admin" class="hidden">
+<div class="card">
+<h3 style="margin-bottom:12px">队伍管理 <span class="muted" id="team-count"></span></h3>
+<div class="row" style="margin-bottom:14px">
+<input type="text" id="new-name" maxlength="40" placeholder="新队伍名称" style="width:240px">
+<button class="small" onclick="addTeam()">创建队伍</button>
+<span class="muted" id="add-msg"></span>
+</div>
+<table><thead><tr><th>ID</th><th>队伍</th><th>Token</th><th>创建时间</th><th>操作</th></tr></thead>
+<tbody id="team-body"></tbody></table>
+</div>
+<div class="card">
+<div class="row" style="margin-bottom:12px">
+<h3>全部提交（最近 200 条）</h3>
+<button class="small ghost" style="margin-left:auto" onclick="loadAdminSubs()">刷新</button>
+</div>
+<table><thead><tr><th>#</th><th>队伍</th><th>阶段</th><th>状态</th>
+<th style="text-align:right">综合分</th><th>F2</th><th>F3</th><th>F6</th>
+<th>提交时间</th><th>错误</th><th>操作</th></tr></thead>
+<tbody id="sub-body"></tbody></table>
+</div></div>
 
 <div class="card hidden" id="view-login">
 <h3 style="margin-bottom:4px">登录 / 注册</h3>
-<div class="muted" style="margin-bottom:16px">凭 token 登录，或注册新队伍。</div>
+<div class="muted" style="margin-bottom:16px">队伍凭 token 登录；组委会在同一处输入管理员密钥即进入管理界面。</div>
 <div class="grid2">
 <div>
-<label>已有 token？登录</label>
+<label>登录（队伍 token 或管理员密钥）</label>
 <input type="password" id="login-token" placeholder="粘贴 token">
+<div style="height:8px"></div>
 <button onclick="doLogin()">登录</button>
 <div class="msg" id="login-msg"></div>
 </div>
 <div>
 <label>新队伍？注册</label>
-<input type="text" id="reg-name" placeholder="队伍名称">
+<input type="text" id="reg-name" maxlength="40" placeholder="队伍名称">
+<div style="height:8px"></div>
 <button onclick="doRegister()">注册并获取 token</button>
 <div class="msg" id="reg-msg"></div>
 <div class="hint">注册后 token 只显示一次，请保存。</div>
-</div></div></div></div>
+</div></div></div>
 
 <script>
-let phase='A', token=localStorage.getItem('oj_token')||'';
+let phase='A', token=localStorage.getItem('oj_token')||'', role=localStorage.getItem('oj_role')||'';
 const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const authH=()=>({'Authorization':'Bearer '+token});
 function go(v){
-['leaderboard','submit','dashboard','login'].forEach(x=>{
-$('view-'+x).classList.toggle('hidden', x!==v);});
-if(v==='leaderboard') loadLB();
-if(v==='submit'){}
-if(v==='dashboard') loadDash();
-if(v==='login'){}
+  if((v==='submit'||v==='dashboard') && role!=='team'){ v = role==='admin' ? 'admin' : 'login'; }
+  if(v==='admin' && role!=='admin') v='login';
+  ['leaderboard','submit','dashboard','admin','login'].forEach(x=>$('view-'+x).classList.toggle('hidden',x!==v));
+  if(v==='leaderboard') loadLB();
+  if(v==='dashboard') loadDash();
+  if(v==='admin'){ loadTeams(); loadAdminSubs(); }
 }
-function setPhase(p){phase=p;
-['A','B'].forEach(x=>$('tab'+x).classList.toggle('active',x===p));
-loadLB();}
-function fmt(v){if(v===null||v===undefined)return'—';return(+v).toFixed(1)}
+function setPhase(p){phase=p;['A','B'].forEach(x=>$('tab'+x).classList.toggle('active',x===p));loadLB();}
+function fmt(v){return(v===null||v===undefined)?'—':(+v).toFixed(1)}
 function barW(v){return Math.max(0,Math.min(100,(+v||0)+10))}
-function relTime(s){if(!s)return'';
-const d=new Date(s.replace(' ','T')+'Z'),now=new Date();
-const m=Math.round((now-d)/60000);
-if(m<1)return'刚刚';if(m<60)return m+'分前';
-const h=Math.floor(m/60);if(h<24)return h+'小时前';
-return s.slice(5,16);}
-function badge(s){const m={queued:['queued','排队中'],running:['running','评测中'],
-done:['done','完成'],error:['error','错误']};
-const[c,n]=(m[s]||['queued',s]);return `<span class="badge ${c}">${n}</span>`;}
+function relTime(s){if(!s)return'';const d=new Date(s.replace(' ','T')+'Z'),m=Math.round((new Date()-d)/60000);
+  if(m<1)return'刚刚';if(m<60)return m+'分前';const h=Math.floor(m/60);if(h<24)return h+'小时前';return s.slice(5,16);}
+function badge(s){const m={queued:['queued','排队中'],running:['running','评测中'],done:['done','完成'],error:['error','错误']};
+  const[c,n]=(m[s]||['queued',s]);return `<span class="badge ${c}">${esc(n)}</span>`;}
+function vizLink(u){return u?`<a class="lk" href="${esc(u)}" target="_blank">▶ 3D 动画</a>`:'<span class="muted">—</span>';}
+function msg(id,ok,text){const m=$(id);m.className='msg '+(ok?'ok':'err');m.style.display='block';m.textContent=text;}
+function setSession(t,r,name){token=t;role=r;localStorage.setItem('oj_token',t);localStorage.setItem('oj_role',r);
+  localStorage.setItem('oj_name',name||'');refreshUser();}
 function refreshUser(){
-const b=$('user-badge');
-if(token){b.innerHTML='已登录 · <a onclick="doLogout()" style="color:#fff">退出</a>';}
-else{b.innerHTML='<a onclick="go(\'login\')" style="color:#fff">登录/注册</a>';}}
-function doLogout(){token='';localStorage.removeItem('oj_token');refreshUser();go('login');}
+  const b=$('user-badge'),name=localStorage.getItem('oj_name')||'';
+  $('nav-admin').classList.toggle('hidden',role!=='admin');
+  $('nav-submit').classList.toggle('hidden',role==='admin');
+  $('nav-dashboard').classList.toggle('hidden',role==='admin');
+  if(token){b.innerHTML=esc(name||'已登录')+' · <a onclick="doLogout()" style="color:#fff">退出</a>';}
+  else{b.innerHTML='<a onclick="go(\'login\')" style="color:#fff">登录/注册</a>';}}
+function doLogout(){token='';role='';['oj_token','oj_role','oj_name'].forEach(k=>localStorage.removeItem(k));refreshUser();go('leaderboard');}
 async function doLogin(){
-const t=$('login-token').value.trim(); if(!t)return;
-try{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t})});
-const d=await r.json();
-if(r.ok){token=t;localStorage.setItem('oj_token',t);
-$('login-msg').className='msg ok';$('login-msg').style.display='block';
-$('login-msg').textContent='欢迎 '+d.name;refreshUser();go('dashboard');}
-else{$('login-msg').className='msg err';$('login-msg').style.display='block';$('login-msg').textContent=d.error;}}
-catch(e){console.error(e);}}
+  const t=$('login-token').value.trim();if(!t)return;
+  try{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t})});
+    const d=await r.json();
+    if(!r.ok){msg('login-msg',false,d.error||'登录失败');return;}
+    setSession(t,d.role,d.name);$('login-token').value='';
+    go(d.role==='admin'?'admin':'dashboard');}
+  catch(e){msg('login-msg',false,'网络错误');}}
 async function doRegister(){
-const name=$('reg-name').value.trim();if(!name)return;
-try{const r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
-const d=await r.json();
-if(r.ok){token=d.token;localStorage.setItem('oj_token',token);
-$('reg-msg').className='msg ok';$('reg-msg').style.display='block';
-$('reg-msg').innerHTML='注册成功！token: <code>'+d.token+'</code>（已自动登录）';refreshUser();go('dashboard');}
-else{$('reg-msg').className='msg err';$('reg-msg').style.display='block';$('reg-msg').textContent=d.error;}}
-catch(e){console.error(e);}}
-function onFilePick(e){const f=e.target.files[0];if(!f)return;
-const r=new FileReader();r.onload=()=>{$('code-input').value=r.result;};
-r.readAsText(f);}
-async function loadTemplate(){
-const r=await fetch('/example_policy.py');if(!r.ok)return;
-$('code-input').value=await r.text();}
+  const name=$('reg-name').value.trim();if(!name)return;
+  try{const r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    const d=await r.json();
+    if(!r.ok){msg('reg-msg',false,d.error||'注册失败');return;}
+    setSession(d.token,'team',d.name);
+    alert('注册成功！请务必保存你的 token（只显示这一次）：\n\n'+d.token);
+    go('dashboard');}
+  catch(e){msg('reg-msg',false,'网络错误');}}
+function onFilePick(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{$('code-input').value=r.result;};r.readAsText(f);}
 async function doSubmit(){
-if(!token){go('login');return;}
-const code=$('code-input').value.trim();
-const label=$('label-input').value.trim();
-const m=$('submit-msg');m.style.display='none';
-if(!code){m.className='msg err';m.style.display='block';m.textContent='代码不能为空';return;}
-$('submit-hint').textContent='提交中…';
-try{const r=await fetch('/api/submit',{method:'POST',
-headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
-body:JSON.stringify({code,label})});
-const d=await r.json();
-if(r.ok){m.className='msg ok';m.style.display='block';
-m.textContent='提交成功 #'+d.submission_id+'，正在排队评测';
-$('submit-hint').textContent='评测中，请稍后到「我的提交」查看。';
-setTimeout(()=>{go('dashboard');loadDash();},1500);}
-else{m.className='msg err';m.style.display='block';m.textContent=d.error;
-$('submit-hint').textContent='';}}
-catch(e){m.className='msg err';m.style.display='block';m.textContent='网络错误';}}
+  if(role!=='team'){go('login');return;}
+  const code=$('code-input').value.trim(),label=$('label-input').value.trim();
+  $('submit-msg').style.display='none';
+  if(!code){msg('submit-msg',false,'代码不能为空');return;}
+  $('submit-hint').textContent='提交中…';
+  try{const r=await fetch('/api/submit',{method:'POST',headers:{...authH(),'Content-Type':'application/json'},body:JSON.stringify({code,label})});
+    const d=await r.json();
+    if(r.status===401){doLogout();go('login');return;}
+    if(r.ok){msg('submit-msg',true,'提交成功 #'+d.submission_id+'，正在排队评测');
+      $('submit-hint').textContent='稍后到「我的提交」查看结果。';setTimeout(()=>go('dashboard'),1500);}
+    else{msg('submit-msg',false,d.error||'提交失败');$('submit-hint').textContent='';}}
+  catch(e){msg('submit-msg',false,'网络错误');}}
 async function loadLB(){
-try{const r=await fetch('/api/leaderboard?phase='+phase);
-const d=await r.json();const rows=d.rows||[];
-$('lb-count').textContent=rows.length+' 支队伍上榜';
-const b=$('lb-body');
-if(!rows.length){b.innerHTML='<tr><td colspan="8" class="empty">暂无提交</td></tr>';return;}
-b.innerHTML=rows.map((x,i)=>{const rk=i+1;
-const rc=rk<=3?['r1','r2','r3'][rk-1]:'';
-const bar=`<div class="bar"><div style="width:${barW(x.combined)}%"></div></div>`;
-return `<tr><td class="rank ${rc}">${rk<=3?['🥇','🥈','🥉'][rk-1]:rk}</td>
-<td style="font-weight:600">${x.name}</td>
-<td style="text-align:right"><div class="sc">${fmt(x.combined)}</div>${bar}</td>
+  try{const r=await fetch('/api/leaderboard?phase='+phase);const d=await r.json();const rows=d.rows||[];
+    $('lb-count').textContent=rows.length+' 支队伍上榜';const b=$('lb-body');
+    if(!rows.length){b.innerHTML='<tr><td colspan="9" class="empty">暂无提交</td></tr>';return;}
+    b.innerHTML=rows.map((x,i)=>{const rk=i+1,rc=rk<=3?['r1','r2','r3'][rk-1]:'';
+      return `<tr><td class="rank ${rc}">${rk<=3?['🥇','🥈','🥉'][rk-1]:rk}</td>
+<td style="font-weight:600">${esc(x.name)}</td>
+<td style="text-align:right"><div class="sc">${fmt(x.combined)}</div><div class="bar"><div style="width:${barW(x.combined)}%"></div></div></td>
 <td>${fmt(x.score_F2)}</td><td>${fmt(x.score_F3)}</td><td>${fmt(x.score_F6)}</td>
-<td class="muted">${relTime(x.submitted_at)}</td><td class="muted">${x.label||''}</td></tr>`;}).join('');}
-catch(e){console.error(e);}}
+<td class="muted">${relTime(x.submitted_at)}</td><td class="muted">${esc(x.label)}</td><td>${vizLink(x.viz_url)}</td></tr>`;}).join('');}
+  catch(e){console.error(e);}}
 async function loadDash(){
-if(!token){go('login');return;}
-$('dash-team').textContent='';
-try{const r=await fetch('/api/my_submissions?phase='+phase,
-{headers:{'Authorization':'Bearer '+token}});
-if(!r.ok){token='';localStorage.removeItem('oj_token');refreshUser();go('login');return;}
-const rows=await r.json();
-$('dash-team').textContent='本队最近 30 条';
-const b=$('dash-body');
-if(!rows.length){b.innerHTML='<tr><td colspan="9" class="empty">暂无提交</td></tr>';return;}
-b.innerHTML=rows.map(x=>`<tr>
-<td>#${x.id}</td><td>${badge(x.status)}</td>
+  try{const r=await fetch('/api/my_submissions?phase='+phase,{headers:authH()});
+    if(!r.ok){doLogout();go('login');return;}
+    const rows=await r.json();$('dash-team').textContent='本队最近 30 条';const b=$('dash-body');
+    if(!rows.length){b.innerHTML='<tr><td colspan="9" class="empty">暂无提交</td></tr>';return;}
+    b.innerHTML=rows.map(x=>`<tr><td>#${x.id}</td><td>${badge(x.status)}</td>
 <td style="text-align:right" class="sc">${fmt(x.combined)}</td>
 <td>${fmt(x.score_F2)}</td><td>${fmt(x.score_F3)}</td><td>${fmt(x.score_F6)}</td>
-<td class="muted">${relTime(x.submitted_at)}</td><td class="muted">${x.label||''}</td>
-<td>${x.viz_url?`<a class="lk" href="${x.viz_url}" target="_blank">Gantt</a>`:'—'}</td>
-</tr>`).join('');}
-catch(e){console.error(e);}}
+<td class="muted">${relTime(x.submitted_at)}</td><td class="muted">${esc(x.label)}</td>
+<td>${x.status==='error'?`<span class="muted" title="${esc(x.error_msg)}">查看错误</span>`:vizLink(x.viz_url)}</td></tr>`).join('');}
+  catch(e){console.error(e);}}
+async function adminApi(url,opts={}){
+  const r=await fetch(url,{...opts,headers:{...authH(),'Content-Type':'application/json',...(opts.headers||{})}});
+  if(r.status===403){doLogout();go('login');throw new Error('forbidden');}
+  return r.json();}
+async function loadTeams(){
+  const rows=await adminApi('/api/admin/teams');$('team-count').textContent=`（${rows.length} 支）`;
+  $('team-body').innerHTML=rows.length?rows.map(t=>`<tr><td class="muted">${t.id}</td>
+<td style="font-weight:600">${esc(t.name)}</td><td><code style="font-size:12px">${esc(t.token)}</code></td>
+<td class="muted">${esc(t.created_at)}</td>
+<td><button class="small" style="background:var(--err)" onclick="delTeam(${t.id})">删除</button></td></tr>`).join('')
+    :'<tr><td colspan="5" class="empty">暂无队伍</td></tr>';}
+async function addTeam(){
+  const name=$('new-name').value.trim();if(!name)return;
+  const d=await adminApi('/api/admin/teams',{method:'POST',body:JSON.stringify({name})});
+  $('add-msg').textContent=d.error?d.error:`已创建「${d.name}」 token: ${d.token}`;
+  $('new-name').value='';loadTeams();}
+async function delTeam(id){
+  if(!confirm('确定删除该队伍及其全部提交？'))return;
+  await adminApi('/api/admin/teams/'+id,{method:'DELETE'});loadTeams();loadAdminSubs();}
+async function loadAdminSubs(){
+  const rows=await adminApi('/api/admin/submissions?limit=200');
+  $('sub-body').innerHTML=rows.length?rows.map(x=>`<tr><td>#${x.id}</td>
+<td style="font-weight:600">${esc(x.team_name)}</td><td>${esc(x.phase)}</td><td>${badge(x.status)}</td>
+<td style="text-align:right" class="sc">${fmt(x.combined)}</td>
+<td>${fmt(x.score_F2)}</td><td>${fmt(x.score_F3)}</td><td>${fmt(x.score_F6)}</td>
+<td class="muted">${relTime(x.submitted_at)}</td>
+<td>${x.error_msg?`<span class="muted" title="${esc(x.error_msg)}">${esc(x.error_msg.split('\n').filter(Boolean).pop()).slice(0,60)}</span>`:'—'}</td>
+<td>${(x.status==='error'||x.status==='running')?`<button class="small" onclick="requeue(${x.id})">重试</button>`:vizLink(x.viz_url)}</td></tr>`).join('')
+    :'<tr><td colspan="11" class="empty">暂无提交</td></tr>';}
+async function requeue(sid){await adminApi('/api/admin/requeue/'+sid,{method:'POST'});loadAdminSubs();}
 refreshUser();
-if(token) go('dashboard'); else go('leaderboard');
-loadLB(); setInterval(loadLB,10000);
-$('code-input').addEventListener('keydown',e=>{
-if(e.key==='Tab'){e.preventDefault();
-const t=e.target,s=t.selectionStart,en=t.selectionEnd;
-t.value=t.value.slice(0,s)+'    '+t.value.slice(en);
-t.selectionStart=t.selectionEnd=s+4;}});
+go(role==='admin'?'admin':(role==='team'?'dashboard':'leaderboard'));
+loadLB();setInterval(loadLB,10000);
+$('code-input').addEventListener('keydown',e=>{if(e.key==='Tab'){e.preventDefault();
+  const t=e.target,s=t.selectionStart,en=t.selectionEnd;t.value=t.value.slice(0,s)+'    '+t.value.slice(en);t.selectionStart=t.selectionEnd=s+4;}});
 </script></body></html>
 """
 

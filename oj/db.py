@@ -98,7 +98,7 @@ def get_leaderboard(phase: str = "A") -> list[dict]:
     conn = get_conn()
     rows = conn.execute("""
         SELECT t.name, s.combined, s.score_F2, s.score_F3, s.score_F6,
-               s.submitted_at, s.label, s.id
+               s.submitted_at, s.label, s.id, s.viz_path
         FROM submissions s
         JOIN teams t ON t.id = s.team_id
         WHERE s.phase = ? AND s.status = 'done' AND s.combined IS NOT NULL
