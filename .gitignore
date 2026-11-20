@@ -42,3 +42,4 @@ Thumbs.db
 *.docx
 *.pptx
 *.xlsx
+oj/worker.lock
