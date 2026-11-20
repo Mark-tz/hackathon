@@ -103,12 +103,18 @@ canvas{display:block}
 <option value="20" selected>20×</option><option value="100">100×</option></select>
 <input type="range" id="seek" min="0" max="1000" value="0">
 <span id="timeLabel">0.0 s / 0.0 s</span></div></div></div>
-<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
 <script>
 const DATA = __DATA_JSON__;
 </script>
-<script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 // ─── Three.js 场景搭建 ───────────────────────────────────
 let scene,camera,renderer,controls,clock;
 let machineMeshes={},partMeshes={},robotMesh,baseGroup;
@@ -121,9 +127,9 @@ function init(){
   camera=new THREE.PerspectiveCamera(50,innerWidth/innerHeight,0.1,100);
   camera.position.set(9,9,12);camera.lookAt(0,0,0);
   renderer=new THREE.WebGLRenderer({antialias:true});
-  renderer.setSize(innerWidth-360,innerHeight);renderer.shadowMap.enabled=true;
+  renderer.setSize(innerWidth,innerHeight);renderer.shadowMap.enabled=true;
   document.getElementById('scene').appendChild(renderer.domElement);
-  controls=new THREE.OrbitControls(camera,renderer.domElement);
+  controls=new OrbitControls(camera,renderer.domElement);
   controls.enableDamping=true;controls.target.set(0,0.5,0);
   // 光照
   scene.add(new THREE.AmbientLight(0x404a6b,0.6));
@@ -311,8 +317,8 @@ function animate(){
   update(dt);
   controls.update();renderer.render(scene,camera);
 }
-function onResize(){camera.aspect=(innerWidth-360)/innerHeight;camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth-360,innerHeight);}
+function onResize(){camera.aspect=(innerWidth)/innerHeight;camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);}
 // ─── 控制 ─────────────────────────────────────────────────
 window.addEventListener('resize',onResize);
 document.getElementById('play').onclick=()=>{playing=!playing;
@@ -331,6 +337,14 @@ document.getElementById('seek').oninput=e=>{simT=+e.target.value/1000*tEnd;curso
 };
 clock=new THREE.Clock();
 init();animate();
+document.getElementById('timeLabel').textContent='0.0 s / '+(tEnd/1000).toFixed(1)+' s';
+window.__vizReady=true;
+document.getElementById('load')?.remove();
+</script>
+<script>
+// Three.js 从 CDN 加载失败时给出明确提示，而不是一直显示“加载中”
+setTimeout(()=>{if(!window.__vizReady){const el=document.getElementById('load');
+  if(el)el.textContent='3D 引擎加载失败：请检查网络能否访问 cdn.jsdelivr.net 后刷新页面';}},10000);
 </script></body></html>
 """
 

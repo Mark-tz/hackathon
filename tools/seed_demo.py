@@ -67,10 +67,22 @@ def score_instance(result, base_ms, ref_ms):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--team", default="演示队伍", help="榜单上显示的队伍名")
-    parser.add_argument("--phase", default="A")
+    parser.add_argument("--phase", default="A", help="A / B / all（两个阶段都注入）")
+    parser.add_argument("--force", action="store_true", help="删除已有演示记录后重新生成（例如可视化模板更新后）")
     args = parser.parse_args()
 
     init_db()
+    if args.phase.lower() == "all":
+        rc = 0
+        for ph in ("A", "B"):
+            rc |= seed(args.team, ph, args.force)
+        return rc
+    return seed(args.team, args.phase, args.force)
+
+
+def seed(team_name: str, phase: str, force: bool) -> int:
+    from types import SimpleNamespace
+    args = SimpleNamespace(team=team_name, phase=phase)
     policy_path = str(REPO / "demo_policy.py")
     policy_fn = load_policy(policy_path)
     print(f"[seed_demo] 策略: {policy_path}")
@@ -86,6 +98,12 @@ def main():
         "SELECT id FROM submissions WHERE team_id=? AND phase=? AND status='done'",
         (team["id"], args.phase)).fetchone()
     conn.close()
+    if existing and force:
+        conn = get_conn()
+        conn.execute("DELETE FROM submissions WHERE team_id=? AND phase=?", (team["id"], args.phase))
+        conn.commit(); conn.close()
+        print(f"[seed_demo] --force：已删除阶段 {args.phase} 的旧演示记录，重新生成")
+        existing = None
     if existing:
         print(f"[seed_demo] 已存在评测记录 #{existing['id']}，跳过（若要重置请手动 DELETE FROM submissions WHERE team_id={team['id']}）")
         return 0

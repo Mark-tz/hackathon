@@ -245,7 +245,7 @@ def admin_requeue(sid):
 @app.route("/submit")
 @app.route("/dashboard")
 @app.route("/admin")
-def index(): return Response(_APP_HTML, mimetype="text/html")
+def index(): return Response(_APP_HTML.replace("__CURRENT_PHASE__", CURRENT_PHASE), mimetype="text/html")
 
 _APP_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
@@ -421,7 +421,7 @@ placeholder="def decide(obs):&#10;    acts = obs['legal_actions']&#10;    ..."><
 </div></div></div>
 
 <script>
-let phase='A', token=localStorage.getItem('oj_token')||'', role=localStorage.getItem('oj_role')||'';
+let phase='__CURRENT_PHASE__', token=localStorage.getItem('oj_token')||'', role=localStorage.getItem('oj_role')||'';
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const authH=()=>({'Authorization':'Bearer '+token});
@@ -536,6 +536,8 @@ async function loadAdminSubs(){
     :'<tr><td colspan="11" class="empty">暂无提交</td></tr>';}
 async function requeue(sid){await adminApi('/api/admin/requeue/'+sid,{method:'POST'});loadAdminSubs();}
 refreshUser();
+['A','B'].forEach(x=>$('tab'+x).classList.toggle('active',x===phase));
+$('tab'+phase).textContent+='（进行中）';
 go(role==='admin'?'admin':(role==='team'?'dashboard':'leaderboard'));
 loadLB();setInterval(loadLB,10000);
 $('code-input').addEventListener('keydown',e=>{if(e.key==='Tab'){e.preventDefault();
