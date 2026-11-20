@@ -63,50 +63,92 @@ def load_policy(path: str):
     return mod.decide
 
 
+def _child_evaluate(policy_path: str, result_queue):
+    """在子进程中运行，设置资源限制后执行评测。"""
+    import resource
+
+    # ── 资源限制 ──────────────────────────────────────────
+    try:
+        resource.setrlimit(resource.RLIMIT_CPU,   (120, 120))           # CPU 120s
+        resource.setrlimit(resource.RLIMIT_AS,    (512<<20, 512<<20))   # 内存 512 MB
+        resource.setrlimit(resource.RLIMIT_FSIZE, (8<<20,   8<<20))     # 写文件 8 MB
+        resource.setrlimit(resource.RLIMIT_NOFILE,(64,      64))        # fd 数
+    except Exception:
+        pass
+
+    # ── 清除敏感环境变量，防止策略代码读取 ───────────────
+    import os as _os
+    for key in list(_os.environ):
+        if any(x in key.upper() for x in ("SECRET","TOKEN","KEY","PASS","DB","ADMIN")):
+            del _os.environ[key]
+    try:
+        policy_fn = load_policy(policy_path)
+        by_family: dict[str, list[float]] = {}
+        viz_path = None
+        for sc in PUBLIC_INSTANCES:
+            fam = sc["family"]
+            base_ms = compute_base(sc)
+            ref_ms  = compute_ref(sc)
+            result  = run_once(sc, policy_fn)
+            s = score_instance(result, base_ms, ref_ms)
+            by_family.setdefault(fam, []).append(s)
+            if viz_path is None and fam == "F6" and result.get("valid"):
+                try:
+                    html = build_html(sc, result)
+                    stem = pathlib.Path(policy_path).stem
+                    vfile = VIZ_DIR / f"{stem}_F6.html"
+                    vfile.write_text(html, encoding="utf-8")
+                    viz_path = str(vfile)
+                except Exception:
+                    pass
+        family_means = {fam: sum(v) / len(v) for fam, v in by_family.items()}
+        all_means = list(family_means.values())
+        overall = sum(all_means) / len(all_means) if all_means else 0.0
+        worst2 = sorted(all_means)[:2]
+        worst2_avg = sum(worst2) / 2 if len(worst2) >= 2 else (worst2[0] if worst2 else 0)
+        combined = round(0.7 * overall + 0.3 * worst2_avg, 4)
+        scores = {
+            "F2": round(family_means.get("F2", -100.0), 2),
+            "F3": round(family_means.get("F3", -100.0), 2),
+            "F6": round(family_means.get("F6", -100.0), 2),
+            "combined": combined,
+        }
+        result_queue.put(("ok", scores, viz_path))
+    except Exception:
+        result_queue.put(("err", traceback.format_exc(), None))
+
+
+EVAL_TIMEOUT = int(os.environ.get("OJ_EVAL_TIMEOUT", "150"))  # 秒
+
+
 def evaluate(policy_path: str) -> tuple[dict, str | None]:
-    """返回 (scores_dict, viz_html_path | None)。"""
-    policy_fn = load_policy(policy_path)
-    by_family: dict[str, list[float]] = {}
-    viz_path = None
-
-    for sc in PUBLIC_INSTANCES:
-        fam = sc["family"]
-        base_ms = compute_base(sc)
-        ref_ms  = compute_ref(sc)
-        result  = run_once(sc, policy_fn)
-        s = score_instance(result, base_ms, ref_ms)
-        by_family.setdefault(fam, []).append(s)
-
-        # 用第一个 F6 实例生成可视化（扰动场景最直观）
-        if viz_path is None and fam == "F6" and result.get("valid"):
-            try:
-                html = build_html(sc, result)
-                stem = pathlib.Path(policy_path).stem
-                vfile = VIZ_DIR / f"{stem}_F6.html"
-                vfile.write_text(html, encoding="utf-8")
-                viz_path = str(vfile)
-            except Exception:
-                pass  # 可视化失败不影响评分
-
-    family_means = {fam: sum(v) / len(v) for fam, v in by_family.items()}
-    all_means = list(family_means.values())
-    overall = sum(all_means) / len(all_means) if all_means else 0.0
-    worst2  = sorted(all_means)[:2]
-    worst2_avg = sum(worst2) / 2 if len(worst2) >= 2 else (worst2[0] if worst2 else 0)
-    combined = round(0.7 * overall + 0.3 * worst2_avg, 4)
-
-    scores = {
-        "F2": round(family_means.get("F2", -100.0), 2),
-        "F3": round(family_means.get("F3", -100.0), 2),
-        "F6": round(family_means.get("F6", -100.0), 2),
-        "combined": combined,
-    }
-    return scores, viz_path
+    """在独立子进程中评测，wall-clock 超时 EVAL_TIMEOUT 秒。"""
+    import multiprocessing
+    q = multiprocessing.Queue()
+    p = multiprocessing.Process(target=_child_evaluate, args=(policy_path, q))
+    p.start()
+    p.join(timeout=EVAL_TIMEOUT)
+    if p.is_alive():
+        p.terminate()
+        p.join(3)
+        raise RuntimeError(f"评测超时（>{EVAL_TIMEOUT}s），已终止子进程")
+    if p.exitcode != 0:
+        raise RuntimeError(f"评测子进程异常退出，exitcode={p.exitcode}")
+    if q.empty():
+        raise RuntimeError("评测子进程无返回（可能被 OOM killer 终止）")
+    status, payload, viz_path = q.get_nowait()
+    if status == "err":
+        raise RuntimeError(payload)
+    return payload, viz_path
 
 
 def run_worker():
     init_db()
-    print("[worker] 启动，等待提交...", flush=True)
+    import os as _os
+    uid = _os.getuid() if hasattr(_os, 'getuid') else -1
+    if uid == 0:
+        print("[worker] 警告：当前以 root 运行，建议切换到低权限用户！", flush=True)
+    print(f"[worker] 启动，等待提交（uid={uid}，超时={EVAL_TIMEOUT}s）...", flush=True)
     while True:
         job = next_queued()
         if not job:

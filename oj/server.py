@@ -1,11 +1,13 @@
 """OJ HTTP 服务器 v2 — 注册/登录 · 代码编辑器提交 · 实时状态页"""
-import sys, os, time, pathlib
+import sys, os, time, pathlib, collections
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from flask import Flask, request, jsonify, abort, Response, send_file
 from oj.db import (init_db, enqueue, get_submission, get_leaderboard,
                    create_team, get_conn)
 
 app = Flask(__name__, static_folder=None)
+app.config["MAX_CONTENT_LENGTH"] = 256 * 1024  # 256 KB 上传上限
+
 UPLOAD_DIR = pathlib.Path(__file__).parent / "uploads"
 VIZ_DIR    = pathlib.Path(__file__).parent / "viz"
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -13,6 +15,20 @@ VIZ_DIR.mkdir(exist_ok=True)
 
 CURRENT_PHASE = os.environ.get("OJ_PHASE", "A")
 ADMIN_SECRET  = os.environ.get("OJ_ADMIN", "hackerson-admin")
+
+MAX_CODE_BYTES  = 64 * 1024   # 64 KB
+MAX_LABEL_CHARS = 128
+
+# 注册 IP 简单限速：每 IP 每分钟最多 3 次
+_reg_counter: dict[str, list] = collections.defaultdict(list)
+
+def _reg_rate_ok(ip: str) -> bool:
+    now = time.time()
+    _reg_counter[ip] = [t for t in _reg_counter[ip] if now - t < 60]
+    if len(_reg_counter[ip]) >= 3:
+        return False
+    _reg_counter[ip].append(now)
+    return True
 
 # ── 认证 ─────────────────────────────────────────────────
 def _auth():
@@ -38,10 +54,17 @@ def require_auth(f):
 # ── 注册 ──────────────────────────────────────────────────
 @app.route("/api/register", methods=["POST"])
 def register():
+    ip = request.remote_addr or "unknown"
+    if not _reg_rate_ok(ip):
+        return jsonify({"error": "注册过于频繁，请稍后再试"}), 429
     data = request.get_json(force=True) or {}
     name = (data.get("name") or "").strip()
     if not name or len(name) > 40:
         return jsonify({"error": "队伍名称须为 1–40 个字符"}), 400
+    # 只允许字母、数字、中文、空格、连字符
+    import re
+    if not re.match(r'^[\w一-鿿 \-]+$', name):
+        return jsonify({"error": "队伍名称含非法字符"}), 400
     conn = get_conn()
     existing = conn.execute("SELECT id FROM teams WHERE name=?", (name,)).fetchone()
     conn.close()
@@ -74,16 +97,22 @@ def submit():
     # 支持两种方式：multipart 文件 或 JSON 代码字符串
     if request.files.get("policy"):
         f = request.files["policy"]
-        if not f.filename.endswith(".py"):
+        if not f.filename.lower().endswith(".py"):
             return jsonify({"error": "只接受 .py 策略文件"}), 400
-        code = f.read().decode("utf-8", errors="replace")
+        raw = f.read(MAX_CODE_BYTES + 1)
+        if len(raw) > MAX_CODE_BYTES:
+            return jsonify({"error": f"文件超过 {MAX_CODE_BYTES//1024} KB 上限"}), 413
+        code = raw.decode("utf-8", errors="replace")
         label = request.form.get("label", "")
     else:
         body = request.get_json(force=True) or {}
         code = body.get("code", "")
         label = body.get("label", "")
+        if len(code.encode()) > MAX_CODE_BYTES:
+            return jsonify({"error": f"代码超过 {MAX_CODE_BYTES//1024} KB 上限"}), 413
         if not code.strip():
             return jsonify({"error": "请上传 .py 文件或在 code 字段提供代码"}), 400
+    label = (label or "")[:MAX_LABEL_CHARS]
     # 限流
     conn = get_conn()
     recent = conn.execute("""SELECT COUNT(*) FROM submissions
