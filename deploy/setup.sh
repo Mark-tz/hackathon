@@ -3,7 +3,8 @@
 # 用法：sudo bash deploy/setup.sh
 set -euo pipefail
 
-REPO_DIR="/home/hackerson"
+# 仓库根目录：脚本在 <repo>/deploy/setup.sh，向上一级即为根
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SERVICE_DIR="/etc/systemd/system"
 ENV_FILE="/etc/oj.env"
 OJ_USER="oj"
@@ -59,14 +60,14 @@ else
     echo ""
 fi
 
-# ── 6. 安装 systemd 服务 ──────────────────────────────────
+# ── 6. 安装 systemd 服务（替换路径占位符）────────────────
 echo "[5/6] 安装 systemd 服务..."
 DEPLOY_DIR="$(dirname "$0")"
-cp "${DEPLOY_DIR}/oj-server.service" "${SERVICE_DIR}/"
-cp "${DEPLOY_DIR}/oj-worker.service" "${SERVICE_DIR}/"
+sed "s|/home/hackerson|${REPO_DIR}|g" "${DEPLOY_DIR}/oj-server.service" > "${SERVICE_DIR}/oj-server.service"
+sed "s|/home/hackerson|${REPO_DIR}|g" "${DEPLOY_DIR}/oj-worker.service" > "${SERVICE_DIR}/oj-worker.service"
 systemctl daemon-reload
 systemctl enable oj-server oj-worker
-echo "  服务已注册：oj-server, oj-worker"
+echo "  服务已注册：oj-server, oj-worker（路径: ${REPO_DIR}）"
 
 # ── 7. 初始化数据库 ───────────────────────────────────────
 echo "[6/6] 初始化数据库..."
@@ -77,6 +78,7 @@ echo "  数据库初始化完成"
 # ── 完成 ──────────────────────────────────────────────────
 echo ""
 echo "=== 部署完成 ==="
+echo "  仓库路径: ${REPO_DIR}"
 echo ""
 echo "下一步："
 echo "  1. 编辑管理员密钥：sudo nano ${ENV_FILE}"
@@ -84,6 +86,7 @@ echo "  2. 启动服务：sudo systemctl start oj-server oj-worker"
 echo "  3. 查看状态：sudo systemctl status oj-server oj-worker"
 echo "  4. 查看日志：sudo journalctl -u oj-server -f"
 echo "              sudo journalctl -u oj-worker -f"
+echo "  5. 生成演示榜单数据：sudo -u ${OJ_USER} python3 ${REPO_DIR}/tools/seed_demo.py"
 echo ""
 echo "批量添加队伍（可选）："
 echo "  sudo -u ${OJ_USER} python3 ${REPO_DIR}/oj/db.py addteam \"队伍名称\""
