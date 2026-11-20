@@ -37,7 +37,9 @@ echo "[3/6] 设置目录权限..."
 # 确保 oj 目录存在
 mkdir -p "${REPO_DIR}/oj/uploads" "${REPO_DIR}/oj/viz"
 # oj/ 目录本身需要 oj 用户可写（SQLite WAL 要在同目录建 -wal/-shm 文件）
-chown root:"${OJ_USER}" "${REPO_DIR}/oj"
+# 属主用执行 sudo 的部署用户（便于 rsync 更新代码），属组 oj（服务可写 WAL 文件）
+DEPLOY_USER="${SUDO_USER:-root}"
+chown "${DEPLOY_USER}":"${OJ_USER}" "${REPO_DIR}/oj"
 chmod 775 "${REPO_DIR}/oj"
 chown -R "${OJ_USER}:${OJ_USER}" "${REPO_DIR}/oj/uploads" \
                                    "${REPO_DIR}/oj/viz"
