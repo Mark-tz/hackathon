@@ -7,6 +7,7 @@ seed_demo.py — 在榜单中插入 demo_policy 占位记录，部署后运行�
 用法：
     python3 tools/seed_demo.py
     python3 tools/seed_demo.py --team "演示队伍"   # 自定义队伍名
+    python3 tools/seed_demo.py --force            # 删除旧演示记录后重新生成
 """
 import os, sys, pathlib, importlib.util, argparse
 
@@ -67,26 +68,15 @@ def score_instance(result, base_ms, ref_ms):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--team", default="演示队伍", help="榜单上显示的队伍名")
-    parser.add_argument("--phase", default="A", help="A / B / all（两个阶段都注入）")
     parser.add_argument("--force", action="store_true", help="删除已有演示记录后重新生成（例如可视化模板更新后）")
     args = parser.parse_args()
 
     init_db()
-    if args.phase.lower() == "all":
-        rc = 0
-        for ph in ("A", "B"):
-            rc |= seed(args.team, ph, args.force)
-        return rc
-    return seed(args.team, args.phase, args.force)
-
-
-def seed(team_name: str, phase: str, force: bool) -> int:
-    from types import SimpleNamespace
-    args = SimpleNamespace(team=team_name, phase=phase)
+    args.phase = "A"  # 比赛只有一个阶段
     policy_path = str(REPO / "demo_policy.py")
     policy_fn = load_policy(policy_path)
     print(f"[seed_demo] 策略: {policy_path}")
-    print(f"[seed_demo] 队伍: {args.team}  阶段: {args.phase}")
+    print(f"[seed_demo] 队伍: {args.team}")
 
     # 创建队伍（已存在时复用）
     team = create_team(args.team)
@@ -98,11 +88,11 @@ def seed(team_name: str, phase: str, force: bool) -> int:
         "SELECT id FROM submissions WHERE team_id=? AND phase=? AND status='done'",
         (team["id"], args.phase)).fetchone()
     conn.close()
-    if existing and force:
+    if existing and args.force:
         conn = get_conn()
         conn.execute("DELETE FROM submissions WHERE team_id=? AND phase=?", (team["id"], args.phase))
         conn.commit(); conn.close()
-        print(f"[seed_demo] --force：已删除阶段 {args.phase} 的旧演示记录，重新生成")
+        print(f"[seed_demo] --force：已删除旧演示记录，重新生成")
         existing = None
     if existing:
         print(f"[seed_demo] 已存在评测记录 #{existing['id']}，跳过（若要重置请手动 DELETE FROM submissions WHERE team_id={team['id']}）")
@@ -125,7 +115,7 @@ def seed(team_name: str, phase: str, force: bool) -> int:
         if viz_path is None and fam == "F6" and result.get("valid"):
             try:
                 html = build_3d_html(sc, result)
-                vfile = VIZ_DIR / f"demo_team_phase{args.phase}_F6.html"
+                vfile = VIZ_DIR / "demo_team_F6.html"
                 vfile.write_text(html, encoding="utf-8")
                 viz_path = str(vfile)
                 print(f"  → 可视化: {vfile}")

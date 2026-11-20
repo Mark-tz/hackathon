@@ -14,7 +14,7 @@ VIZ_DIR    = pathlib.Path(__file__).parent / "viz"
 UPLOAD_DIR.mkdir(exist_ok=True)
 VIZ_DIR.mkdir(exist_ok=True)
 
-CURRENT_PHASE = os.environ.get("OJ_PHASE", "A")
+PHASE = "A"  # 比赛只有一个阶段；数据库 phase 列保留以兼容旧数据
 ADMIN_SECRET  = os.environ.get("OJ_ADMIN", "hackerson-admin")
 
 MAX_CODE_BYTES  = 64 * 1024   # 64 KB
@@ -103,7 +103,7 @@ def login():
 @require_auth
 def submit():
     team = request.team
-    phase = CURRENT_PHASE
+    phase = PHASE
     code = label = None
     # 支持两种方式：multipart 文件 或 JSON 代码字符串
     if request.files.get("policy"):
@@ -133,7 +133,7 @@ def submit():
     conn.close()
     if recent >= 1:
         return jsonify({"error": "提交过于频繁，请 5 分钟后再试"}), 429
-    fname = f"team{team['id']}_phase{phase}_{int(time.time())}.py"
+    fname = f"team{team['id']}_{int(time.time())}.py"
     path  = UPLOAD_DIR / fname
     path.write_text(code, encoding="utf-8")
     sid = enqueue(team["id"], phase, str(path), label)
@@ -158,7 +158,7 @@ def status(sid):
 @require_auth
 def my_submissions():
     team = request.team
-    phase = request.args.get("phase", CURRENT_PHASE)
+    phase = PHASE
     conn = get_conn()
     rows = conn.execute("""SELECT id, submitted_at, status, combined,
         score_F2, score_F3, score_F6, label, error_msg, viz_path
@@ -176,11 +176,11 @@ def my_submissions():
 # ── 榜单 API ────────────────────────────────────────────────
 @app.route("/api/leaderboard")
 def leaderboard_api():
-    phase = request.args.get("phase", CURRENT_PHASE)
+    phase = PHASE
     rows = get_leaderboard(phase)
     for d in rows:
         d["viz_url"] = f"/viz/{d['id']}" if d.pop("viz_path", None) else None
-    return jsonify({"phase": phase, "rows": rows})
+    return jsonify({"rows": rows})
 
 # ── 3D 可视化（公开：榜单与提交记录都可直接打开）──────────
 @app.route("/viz/<int:sid>")
@@ -245,7 +245,7 @@ def admin_requeue(sid):
 @app.route("/submit")
 @app.route("/dashboard")
 @app.route("/admin")
-def index(): return Response(_APP_HTML.replace("__CURRENT_PHASE__", CURRENT_PHASE), mimetype="text/html")
+def index(): return Response(_APP_HTML, mimetype="text/html")
 
 _APP_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
@@ -301,11 +301,6 @@ tr:hover td{background:#f8f9fb}
 .badge.running{background:#feefc3;color:#b06000}
 .badge.done{background:#e6f4ea;color:#1e7e34}
 .badge.error{background:#fce8e6;color:#c62828}
-.phase-tabs{display:flex;gap:6px;margin:14px 28px 0}
-.tab{padding:6px 16px;border-radius:16px;cursor:pointer;font-size:13px;
-font-weight:500;border:2px solid transparent}
-.tab.active{background:var(--accent);color:#fff}
-.tab:not(.active){background:#fff;color:var(--muted);border-color:var(--border)}
 .hidden{display:none}
 .hint{font-size:12px;color:var(--muted);margin-top:6px}
 a.lk{color:var(--accent);text-decoration:none;font-size:13px}
@@ -325,10 +320,6 @@ a.lk:hover{text-decoration:underline}
 </div></header>
 
 <div id="view-leaderboard">
-<div class="phase-tabs">
-<div class="tab active" id="tabA" onclick="setPhase('A')">阶段 A</div>
-<div class="tab" id="tabB" onclick="setPhase('B')">阶段 B</div>
-</div>
 <div class="card">
 <div class="row" style="margin-bottom:12px">
 <span class="muted" id="lb-count">加载中…</span>
@@ -394,7 +385,7 @@ placeholder="def decide(obs):&#10;    acts = obs['legal_actions']&#10;    ..."><
 <h3>全部提交（最近 200 条）</h3>
 <button class="small ghost" style="margin-left:auto" onclick="loadAdminSubs()">刷新</button>
 </div>
-<table><thead><tr><th>#</th><th>队伍</th><th>阶段</th><th>状态</th>
+<table><thead><tr><th>#</th><th>队伍</th><th>状态</th>
 <th style="text-align:right">综合分</th><th>F2</th><th>F3</th><th>F6</th>
 <th>提交时间</th><th>错误</th><th>操作</th></tr></thead>
 <tbody id="sub-body"></tbody></table>
@@ -421,7 +412,7 @@ placeholder="def decide(obs):&#10;    acts = obs['legal_actions']&#10;    ..."><
 </div></div></div>
 
 <script>
-let phase='__CURRENT_PHASE__', token=localStorage.getItem('oj_token')||'', role=localStorage.getItem('oj_role')||'';
+let token=localStorage.getItem('oj_token')||'', role=localStorage.getItem('oj_role')||'';
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const authH=()=>({'Authorization':'Bearer '+token});
@@ -433,7 +424,6 @@ function go(v){
   if(v==='dashboard') loadDash();
   if(v==='admin'){ loadTeams(); loadAdminSubs(); }
 }
-function setPhase(p){phase=p;['A','B'].forEach(x=>$('tab'+x).classList.toggle('active',x===p));loadLB();}
 function fmt(v){return(v===null||v===undefined)?'—':(+v).toFixed(1)}
 function barW(v){return Math.max(0,Math.min(100,(+v||0)+10))}
 function relTime(s){if(!s)return'';const d=new Date(s.replace(' ','T')+'Z'),m=Math.round((new Date()-d)/60000);
@@ -484,7 +474,7 @@ async function doSubmit(){
     else{msg('submit-msg',false,d.error||'提交失败');$('submit-hint').textContent='';}}
   catch(e){msg('submit-msg',false,'网络错误');}}
 async function loadLB(){
-  try{const r=await fetch('/api/leaderboard?phase='+phase);const d=await r.json();const rows=d.rows||[];
+  try{const r=await fetch('/api/leaderboard');const d=await r.json();const rows=d.rows||[];
     $('lb-count').textContent=rows.length+' 支队伍上榜';const b=$('lb-body');
     if(!rows.length){b.innerHTML='<tr><td colspan="9" class="empty">暂无提交</td></tr>';return;}
     b.innerHTML=rows.map((x,i)=>{const rk=i+1,rc=rk<=3?['r1','r2','r3'][rk-1]:'';
@@ -495,7 +485,7 @@ async function loadLB(){
 <td class="muted">${relTime(x.submitted_at)}</td><td class="muted">${esc(x.label)}</td><td>${vizLink(x.viz_url)}</td></tr>`;}).join('');}
   catch(e){console.error(e);}}
 async function loadDash(){
-  try{const r=await fetch('/api/my_submissions?phase='+phase,{headers:authH()});
+  try{const r=await fetch('/api/my_submissions',{headers:authH()});
     if(!r.ok){doLogout();go('login');return;}
     const rows=await r.json();$('dash-team').textContent='本队最近 30 条';const b=$('dash-body');
     if(!rows.length){b.innerHTML='<tr><td colspan="9" class="empty">暂无提交</td></tr>';return;}
@@ -527,17 +517,15 @@ async function delTeam(id){
 async function loadAdminSubs(){
   const rows=await adminApi('/api/admin/submissions?limit=200');
   $('sub-body').innerHTML=rows.length?rows.map(x=>`<tr><td>#${x.id}</td>
-<td style="font-weight:600">${esc(x.team_name)}</td><td>${esc(x.phase)}</td><td>${badge(x.status)}</td>
+<td style="font-weight:600">${esc(x.team_name)}</td><td>${badge(x.status)}</td>
 <td style="text-align:right" class="sc">${fmt(x.combined)}</td>
 <td>${fmt(x.score_F2)}</td><td>${fmt(x.score_F3)}</td><td>${fmt(x.score_F6)}</td>
 <td class="muted">${relTime(x.submitted_at)}</td>
 <td>${x.error_msg?`<span class="muted" title="${esc(x.error_msg)}">${esc(x.error_msg.split('\n').filter(Boolean).pop()).slice(0,60)}</span>`:'—'}</td>
 <td>${(x.status==='error'||x.status==='running')?`<button class="small" onclick="requeue(${x.id})">重试</button>`:vizLink(x.viz_url)}</td></tr>`).join('')
-    :'<tr><td colspan="11" class="empty">暂无提交</td></tr>';}
+    :'<tr><td colspan="10" class="empty">暂无提交</td></tr>';}
 async function requeue(sid){await adminApi('/api/admin/requeue/'+sid,{method:'POST'});loadAdminSubs();}
 refreshUser();
-['A','B'].forEach(x=>$('tab'+x).classList.toggle('active',x===phase));
-$('tab'+phase).textContent+='（进行中）';
 go(role==='admin'?'admin':(role==='team'?'dashboard':'leaderboard'));
 loadLB();setInterval(loadLB,10000);
 $('code-input').addEventListener('keydown',e=>{if(e.key==='Tab'){e.preventDefault();
@@ -549,6 +537,6 @@ if __name__ == "__main__":
     init_db()
     port = int(os.environ.get("OJ_PORT", 8080))
     bind = os.environ.get("OJ_BIND", "127.0.0.1")
-    print(f"[server] http://{bind}:{port}  phase={CURRENT_PHASE}")
+    print(f"[server] http://{bind}:{port}")
     app.run(host=bind, port=port, debug=False, threaded=True)
 
