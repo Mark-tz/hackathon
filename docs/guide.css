@@ -1,0 +1,61 @@
+/* 参赛指南 PDF 样式（tools/build_guide.sh 使用） */
+@page { size: A4; margin: 16mm 15mm 16mm 15mm; }
+* { box-sizing: border-box; }
+html { font-size: 10.5pt; }
+body {
+  font-family: "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #1c2430; line-height: 1.65; margin: 0; max-width: none; padding: 0;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
+a { color: #1a5fd0; text-decoration: none; }
+
+.cover {
+  background: linear-gradient(135deg, #0f1b33 0%, #1a3f8a 100%);
+  color: #fff; border-radius: 10px; padding: 26px 28px 22px; margin-bottom: 20px;
+}
+.cover .kicker { font-size: 9pt; letter-spacing: .18em; color: #9ec1ff; font-weight: 700; }
+.cover .title { font-size: 25pt; margin: 6px 0 4px; border: 0; padding: 0; color: #fff; line-height: 1.25; }
+.cover .sub { margin: 0 0 16px; color: #d5e2fb; font-size: 11pt; }
+.cover table.facts { width: 100%; border-collapse: collapse; margin: 0; font-size: 10pt; }
+.cover table.facts td { border: 0; border-top: 1px solid rgba(255,255,255,.16); padding: 7px 0; background: none; color: #fff; vertical-align: top; }
+.cover table.facts td:first-child { width: 6.5em; color: #9ec1ff; font-weight: 700; white-space: nowrap; }
+.cover a { color: #fff; text-decoration: underline; }
+.cover code { background: rgba(255,255,255,.15); color: #fff; }
+
+h2 {
+  font-size: 15pt; margin: 26px 0 10px; padding-bottom: 6px;
+  border-bottom: 2px solid #1a5fd0; color: #10203c; break-after: avoid;
+}
+h3 { font-size: 11.5pt; margin: 18px 0 6px; color: #10203c; break-after: avoid; }
+p { margin: 7px 0; orphans: 3; widows: 3; }
+ul, ol { margin: 6px 0; padding-left: 1.5em; }
+li { margin: 3px 0; }
+
+code {
+  font-family: "DejaVu Sans Mono", "Noto Sans Mono CJK SC", Menlo, Consolas, monospace;
+  font-size: .88em; background: #eef1f6; padding: 1px 5px; border-radius: 3px; color: #1c2430;
+}
+pre {
+  background: #f4f6fa; border: 1px solid #dfe4ec; border-left: 3px solid #1a5fd0; border-radius: 5px;
+  padding: 9px 12px; margin: 8px 0; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+  break-inside: avoid;
+}
+pre code { background: none; padding: 0; font-size: 8.6pt; color: #1c2430; }
+pre code span { color: inherit !important; font-weight: inherit !important; font-style: inherit !important; }
+
+table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 9.6pt; break-inside: avoid; }
+th { background: #eaf0fa; text-align: left; font-weight: 700; color: #10203c; }
+th, td { border: 1px solid #d5dbe6; padding: 5px 9px; vertical-align: top; }
+td:first-child { white-space: nowrap; }
+
+figure { margin: 10px 0 12px; text-align: center; break-inside: avoid; }
+figure img, p > img { max-width: 100%; border: 1px solid #d5dbe6; border-radius: 6px; }
+figcaption { font-size: 8.8pt; color: #5a6677; margin-top: 4px; }
+
+.warn, .note { border-radius: 5px; padding: 8px 12px; margin: 10px 0; font-size: 9.8pt; break-inside: avoid; }
+.warn { background: #fff4e5; border-left: 4px solid #e8890c; }
+.note { background: #eaf3ff; border-left: 4px solid #1a5fd0; }
+.pb { break-before: page; margin-top: 0; }
+/* 覆盖 pandoc 默认样式：代码必须换行，否则长行会把整页撑宽 */
+pre, pre code { white-space: pre-wrap !important; word-break: break-all; overflow: visible !important; }
+pre { break-inside: auto; }

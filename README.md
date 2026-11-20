@@ -117,9 +117,18 @@ python3 -I simkit/evaluate_policy.py \
 ```bash
 python3 -I simkit/visualize.py \
     --instance dev-F6-301 \
-    --policy   simkit.baselines.l1_policy \
+    --policy   example_policy.py \
     --fn       decide \
     --out      result.html
+```
+
+想看和 OJ 网站上一样的 3D 策略动画，用 `visualize_3d.py`（需联网加载 Three.js）：
+
+```bash
+python3 -I simkit/visualize_3d.py \
+    --instance dev-F6-301 \
+    --policy   example_policy.py \
+    --out      result_3d.html
 ```
 
 用浏览器打开 `result.html`，可以看到：
@@ -164,7 +173,7 @@ def decide(obs: dict) -> dict:
     ...
 ```
 
-完整的 rollout 策略示例见 `simkit/baselines/l1_policy.py`。
+参赛包不附带 rollout 示例，这部分留给你自己实现。
 
 ---
 

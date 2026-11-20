@@ -143,7 +143,7 @@ def main():
     print(f"\n[seed_demo] 完成 → submission #{sid}")
     print(f"  F2={scores['F2']}  F3={scores['F3']}  F6={scores['F6']}  combined={combined}")
     if viz_path:
-        print(f"  可视化链接: /api/viz/{sid}  (需用 token={team['token']} 登录后访问)")
+        print(f"  可视化链接: /viz/{sid}（公开，榜单上也有入口）")
     return 0
 
 
