@@ -36,8 +36,6 @@ fi
 echo "[3/6] 设置目录权限..."
 # 确保 oj 目录存在
 mkdir -p "${REPO_DIR}/oj/uploads" "${REPO_DIR}/oj/viz"
-# 数据目录归 oj 用户，代码目录只读
-chown -R root:root "${REPO_DIR}"
 # oj/ 目录本身需要 oj 用户可写（SQLite WAL 要在同目录建 -wal/-shm 文件）
 chown root:"${OJ_USER}" "${REPO_DIR}/oj"
 chmod 775 "${REPO_DIR}/oj"
