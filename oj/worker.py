@@ -12,7 +12,7 @@ from oj.db import init_db, next_queued, set_running, set_result
 from simkit.engine import Engine
 from simkit.baselines.simple import baseline_worst, baseline_fifo, baseline_greedy, baseline_batch
 from simkit.scenarios_public import PUBLIC_INSTANCES, PUBLIC_F6
-from simkit.visualize import build_html
+from simkit.visualize_3d import build_3d_html
 
 VIZ_DIR = pathlib.Path(__file__).parent / "viz"
 VIZ_DIR.mkdir(exist_ok=True)
@@ -94,7 +94,7 @@ def _child_evaluate(policy_path: str, result_queue):
             by_family.setdefault(fam, []).append(s)
             if viz_path is None and fam == "F6" and result.get("valid"):
                 try:
-                    html = build_html(sc, result)
+                    html = build_3d_html(sc, result)
                     stem = pathlib.Path(policy_path).stem
                     vfile = VIZ_DIR / f"{stem}_F6.html"
                     vfile.write_text(html, encoding="utf-8")
