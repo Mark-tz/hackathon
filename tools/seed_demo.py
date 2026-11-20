@@ -1,23 +1,28 @@
 """
-seed_demo.py — 生成预置演示可视化数据。
+seed_demo.py — 在榜单中插入 demo_policy 占位记录，部署后运行一次。
 
-部署后运行一次，用 example_policy 跑一个公开 F6 实例，
-把 3D 可视化 HTML 写到 oj/demo_viz/，让访问者在无任何提交时
-也能直接通过 /demo_viz 看到效果。
+效果：OJ 榜单上会出现一条「演示队伍」的真实评测结果（约 50 分），
+让参赛者一进来就能看到有成绩、可以点可视化，不会看到空榜。
 
 用法：
     python3 tools/seed_demo.py
+    python3 tools/seed_demo.py --team "演示队伍"   # 自定义队伍名
 """
-import os, sys, pathlib, importlib.util
+import os, sys, pathlib, importlib.util, argparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from oj.db import init_db, get_conn, create_team, enqueue, set_result
 from simkit.engine import Engine
-from simkit.scenarios_public import PUBLIC_F6
+from simkit.scenarios_public import PUBLIC_INSTANCES, PUBLIC_F6
+from simkit.baselines.simple import baseline_worst, baseline_fifo, baseline_greedy, baseline_batch
 from simkit.visualize_3d import build_3d_html
 
-DEMO_DIR = pathlib.Path(__file__).resolve().parent.parent / "oj" / "demo_viz"
-DEMO_DIR.mkdir(parents=True, exist_ok=True)
+REPO = pathlib.Path(__file__).resolve().parent.parent
+VIZ_DIR = REPO / "oj" / "viz"
+VIZ_DIR.mkdir(parents=True, exist_ok=True)
+
+BASELINES = [baseline_fifo, baseline_greedy, baseline_batch]
 
 
 def load_policy(path: str):
@@ -27,40 +32,110 @@ def load_policy(path: str):
     return mod.decide
 
 
-def run_once(sc: dict, policy_fn) -> dict:
+def run_once(sc: dict, fn) -> dict:
     eng = Engine(sc)
     gen = eng.run()
     try:
         obs = next(gen)
         while True:
-            obs = gen.send(policy_fn(obs))
+            obs = gen.send(fn(obs))
     except StopIteration as e:
         return e.value
-    return {"valid": False, "error": "no_return"}
+    return {"valid": False}
+
+
+def compute_base(sc):
+    r = run_once(sc, baseline_worst)
+    return r["mean_flow_ms"] if r.get("valid") else sc["horizon_ms"]
+
+
+def compute_ref(sc):
+    flows = [run_once(sc, f)["mean_flow_ms"] for f in BASELINES
+             if run_once(sc, f).get("valid")]
+    return int(min(flows) * 0.80) if flows else sc["horizon_ms"] // 2
+
+
+def score_instance(result, base_ms, ref_ms):
+    if not result.get("valid"):
+        return -100.0
+    C = result["mean_flow_ms"]
+    if base_ms <= ref_ms:
+        return 0.0
+    return round(max(-100.0, min(150.0, 100.0 * (base_ms - C) / (base_ms - ref_ms))), 2)
 
 
 def main():
-    # 用仓库根的 example_policy.py 作为演示策略
-    repo = pathlib.Path(__file__).resolve().parent.parent
-    policy_path = str(repo / "example_policy.py")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--team", default="演示队伍", help="榜单上显示的队伍名")
+    parser.add_argument("--phase", default="A")
+    args = parser.parse_args()
+
+    init_db()
+    policy_path = str(REPO / "demo_policy.py")
     policy_fn = load_policy(policy_path)
+    print(f"[seed_demo] 策略: {policy_path}")
+    print(f"[seed_demo] 队伍: {args.team}  阶段: {args.phase}")
 
-    # 选第一个 F6 公开实例（含扰动，可视化效果最有故事感）
-    sc = PUBLIC_F6[0]
-    print(f"[seed_demo] 运行 example_policy 于场景 {sc.get('id','?')} ({sc['family']})")
-    result = run_once(sc, policy_fn)
+    # 创建队伍（已存在时复用）
+    team = create_team(args.team)
+    print(f"[seed_demo] 队伍 id={team['id']}  token={team['token']}")
 
-    if not result.get("valid"):
-        print(f"[seed_demo] 策略返回无效结果: {result.get('error','?')}")
-        return 1
+    # 检查是否已有 done 记录，避免重复注入
+    conn = get_conn()
+    existing = conn.execute(
+        "SELECT id FROM submissions WHERE team_id=? AND phase=? AND status='done'",
+        (team["id"], args.phase)).fetchone()
+    conn.close()
+    if existing:
+        print(f"[seed_demo] 已存在评测记录 #{existing['id']}，跳过（若要重置请手动 DELETE FROM submissions WHERE team_id={team['id']}）")
+        return 0
 
-    html = build_3d_html(sc, result)
-    out = DEMO_DIR / "example_F6.html"
-    out.write_text(html, encoding="utf-8")
-    print(f"[seed_demo] 已写入 {out} ({out.stat().st_size//1024} KB)")
-    print(f"[seed_demo] mean_flow_ms={result.get('mean_flow_ms')}, "
-          f"orders_done={result.get('orders_done')}/{result.get('total_orders')}")
-    print(f"[seed_demo] 访问 /demo_viz 或 /demo_viz/example_F6.html 查看")
+    # 评测
+    by_family: dict[str, list[float]] = {}
+    viz_path = None
+
+    for sc in PUBLIC_INSTANCES:
+        fam = sc["family"]
+        base_ms = compute_base(sc)
+        ref_ms = compute_ref(sc)
+        result = run_once(sc, policy_fn)
+        s = score_instance(result, base_ms, ref_ms)
+        by_family.setdefault(fam, []).append(s)
+        print(f"  {sc['id']:20s}  score={s:6.1f}")
+
+        # 生成 F6 可视化
+        if viz_path is None and fam == "F6" and result.get("valid"):
+            try:
+                html = build_3d_html(sc, result)
+                vfile = VIZ_DIR / f"demo_team_phase{args.phase}_F6.html"
+                vfile.write_text(html, encoding="utf-8")
+                viz_path = str(vfile)
+                print(f"  → 可视化: {vfile}")
+            except Exception as e:
+                print(f"  → 可视化生成失败: {e}")
+
+    # 计算综合分
+    fm = {fam: sum(v) / len(v) for fam, v in by_family.items()}
+    all_m = list(fm.values())
+    overall = sum(all_m) / len(all_m)
+    worst2 = sorted(all_m)[:2]
+    worst2_avg = sum(worst2) / 2 if len(worst2) >= 2 else worst2[0]
+    combined = round(0.7 * overall + 0.3 * worst2_avg, 4)
+    scores = {
+        "F2": round(fm.get("F2", -100.0), 2),
+        "F3": round(fm.get("F3", -100.0), 2),
+        "F6": round(fm.get("F6", -100.0), 2),
+        "combined": combined,
+    }
+
+    # 写入数据库（伪造一条 done 状态的提交）
+    sid = enqueue(team["id"], args.phase, policy_path, label="演示基线")
+    set_result(sid, scores, viz_path=viz_path)
+
+    print(f"\n[seed_demo] 完成 → submission #{sid}")
+    print(f"  F2={scores['F2']}  F3={scores['F3']}  F6={scores['F6']}  combined={combined}")
+    if viz_path:
+        print(f"  可视化链接: /api/viz/{sid}  (需用 token={team['token']} 登录后访问)")
     return 0
 
 
