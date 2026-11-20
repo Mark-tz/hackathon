@@ -1,0 +1,24 @@
+[Unit]
+Description=OJ Evaluation Worker (调度黑客松)
+After=network.target oj-server.service
+
+[Service]
+Type=simple
+User=oj
+Group=oj
+WorkingDirectory=/home/hackerson
+EnvironmentFile=/etc/oj.env
+ExecStart=/usr/bin/python3 /home/hackerson/oj/worker.py
+Restart=on-failure
+RestartSec=5
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/hackerson/oj
+PrivateTmp=true
+# worker 启动子进程评测，允许 fork
+LimitNPROC=64
+
+[Install]
+WantedBy=multi-user.target
