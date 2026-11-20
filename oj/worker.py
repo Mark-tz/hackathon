@@ -148,7 +148,22 @@ def run_worker():
     uid = _os.getuid() if hasattr(_os, 'getuid') else -1
     if uid == 0:
         print("[worker] 警告：当前以 root 运行，建议切换到低权限用户！", flush=True)
-    print(f"[worker] 启动，等待提交（uid={uid}，超时={EVAL_TIMEOUT}s）...", flush=True)
+
+    # ── 单实例锁，防止意外并行启动两个 worker ────────────
+    lock_path = pathlib.Path(__file__).parent / "worker.lock"
+    try:
+        import fcntl
+        lock_fd = open(lock_path, "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_fd.write(str(_os.getpid()))
+        lock_fd.flush()
+    except (ImportError, AttributeError):
+        lock_fd = None  # Windows 下跳过
+    except OSError:
+        print("[worker] 另一个 worker 正在运行，退出。", flush=True)
+        raise SystemExit(1)
+
+    print(f"[worker] 启动，等待提交（uid={uid}，超时={EVAL_TIMEOUT}s，串行模式）...", flush=True)
     while True:
         job = next_queued()
         if not job:

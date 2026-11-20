@@ -157,6 +157,32 @@ def next_queued() -> dict | None:
     return dict(row) if row else None
 
 
+def get_all_teams() -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM teams ORDER BY id").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_team(team_id: int):
+    conn = get_conn()
+    conn.execute("DELETE FROM submissions WHERE team_id=?", (team_id,))
+    conn.execute("DELETE FROM teams WHERE id=?", (team_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_all_submissions(limit: int = 100) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT s.*, t.name as team_name FROM submissions s
+        JOIN teams t ON t.id = s.team_id
+        ORDER BY s.id DESC LIMIT ?
+    """, (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "init":
         init_db()
