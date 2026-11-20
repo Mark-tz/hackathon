@@ -705,6 +705,7 @@ t.selectionStart=t.selectionEnd=s+4;}});
 if __name__ == "__main__":
     init_db()
     port = int(os.environ.get("OJ_PORT", 8080))
-    print(f"[server] http://0.0.0.0:{port}  phase={CURRENT_PHASE}")
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    bind = os.environ.get("OJ_BIND", "127.0.0.1")
+    print(f"[server] http://{bind}:{port}  phase={CURRENT_PHASE}")
+    app.run(host=bind, port=port, debug=False, threaded=True)
 
