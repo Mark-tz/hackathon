@@ -38,12 +38,17 @@ echo "[3/6] 设置目录权限..."
 mkdir -p "${REPO_DIR}/oj/uploads" "${REPO_DIR}/oj/viz"
 # 数据目录归 oj 用户，代码目录只读
 chown -R root:root "${REPO_DIR}"
+# oj/ 目录本身需要 oj 用户可写（SQLite WAL 要在同目录建 -wal/-shm 文件）
+chown root:"${OJ_USER}" "${REPO_DIR}/oj"
+chmod 775 "${REPO_DIR}/oj"
 chown -R "${OJ_USER}:${OJ_USER}" "${REPO_DIR}/oj/uploads" \
                                    "${REPO_DIR}/oj/viz"
-# DB 文件若已存在则转交；否则创建空文件
-touch "${REPO_DIR}/oj/oj.db"
-chown "${OJ_USER}:${OJ_USER}" "${REPO_DIR}/oj/oj.db"
-chmod 660 "${REPO_DIR}/oj/oj.db"
+# DB 文件若已存在则转交；否则创建空文件（含 WAL 模式附属文件）
+for dbf in oj.db oj.db-wal oj.db-shm; do
+    touch "${REPO_DIR}/oj/${dbf}" 2>/dev/null || true
+    chown "${OJ_USER}:${OJ_USER}" "${REPO_DIR}/oj/${dbf}" 2>/dev/null || true
+    chmod 660 "${REPO_DIR}/oj/${dbf}" 2>/dev/null || true
+done
 
 # ── 5. 安装环境变量文件 ───────────────────────────────────
 echo "[4/6] 安装环境变量文件..."
