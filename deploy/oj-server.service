@@ -14,7 +14,7 @@ RestartSec=3
 # 安全加固
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=read-only
 ReadWritePaths=/home/hackerson/oj
 PrivateTmp=true
 
