@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# OJ 运行时产物
+oj/oj.db
+oj/oj.db-wal
+oj/oj.db-shm
+oj/uploads/
+oj/viz/
+
+# 仿真产物
+lineage.jsonl
+*.html
+gantt.html
+
+# IDE / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude 本地会话（不提交）
+.claude/settings.local.json
+.claude/projects/
+
+# 文档原始文件（二进制）
+*.docx
+*.pptx
+*.xlsx
